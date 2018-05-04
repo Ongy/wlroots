@@ -106,6 +106,23 @@ struct tablet_pad_strip {
 	bool stopped;
 };
 
+struct tablet_tool {
+	struct wl_list link;
+	struct zwp_tablet_tool_v2 *tool;
+	struct tablet *tablet;
+
+	enum zwp_tablet_tool_v2_type type;
+	uint64_t hardware_serial;
+	uint64_t hardware_id_wacom;
+
+	bool has_tilt;
+	bool has_pressure;
+	bool has_distance;
+	bool has_rotation;
+	bool has_slider;
+	bool has_wheel;
+};
+
 static void handle_pad_strip_position(void *data,
 		struct zwp_tablet_pad_strip_v2 *zwp_tablet_pad_strip_v2,
 		uint32_t position) {
@@ -488,16 +505,337 @@ static void handle_tablet_added(void *data,
 	wl_list_init(&tablet->paths);
 }
 
+static const char * tablet_tool_type_to_str(enum zwp_tablet_tool_v2_type type)
+{
+	switch (type) {
+	case ZWP_TABLET_TOOL_V2_TYPE_PEN:
+		return "pen";
+	case ZWP_TABLET_TOOL_V2_TYPE_ERASER:
+		return "eraser";
+	case ZWP_TABLET_TOOL_V2_TYPE_BRUSH:
+		return "brush";
+	case ZWP_TABLET_TOOL_V2_TYPE_PENCIL:
+		return "pencil";
+	case ZWP_TABLET_TOOL_V2_TYPE_AIRBRUSH:
+		return "airbrush";
+	case ZWP_TABLET_TOOL_V2_TYPE_FINGER:
+		return "finger";
+	case ZWP_TABLET_TOOL_V2_TYPE_MOUSE:
+		return "mouse";
+	case ZWP_TABLET_TOOL_V2_TYPE_LENS:
+		return "lens";
+	}
+
+	return "Unknown type";
+}
+
+static void
+handle_tablet_v2_tablet_tool_done(void *data, struct zwp_tablet_tool_v2 *id)
+{
+	struct tablet_tool *tool = data;
+
+	printf("\t\ttablet_tool: %s\n", tablet_tool_type_to_str(tool->type));
+	if (tool->hardware_serial) {
+		printf("\t\t\thardware serial: %lx\n", tool->hardware_serial);
+	}
+	if (tool->hardware_id_wacom) {
+		printf("\t\t\thardware wacom: %lx\n", tool->hardware_id_wacom);
+	}
+
+	printf("\t\t\tcapabilities:");
+
+	if (tool->has_tilt) {
+		printf(" tilt");
+	}
+	if (tool->has_pressure) {
+		printf(" pressure");
+	}
+	if (tool->has_distance) {
+		printf(" distance");
+	}
+	if (tool->has_rotation) {
+		printf(" rotation");
+	}
+	if (tool->has_slider) {
+		printf(" slider");
+	}
+	if (tool->has_wheel) {
+		printf(" wheel");
+	}
+	printf("\n");
+
+}
+
+static void
+handle_tablet_v2_tablet_tool_removed(void *data, struct zwp_tablet_tool_v2 *id)
+{
+	struct tablet_tool *tool = data;
+	wl_list_remove(&tool->link);
+
+	zwp_tablet_tool_v2_destroy(tool->tool);
+	free(tool);
+}
+
+static void
+handle_tablet_v2_tablet_tool_type(void *data, struct zwp_tablet_tool_v2 *id,
+                                  uint32_t tool_type)
+{
+	struct tablet_tool *tool = data;
+	tool->type = tool_type;
+}
+
+static void
+handle_tablet_v2_tablet_tool_hardware_serial(void *data,
+                                             struct zwp_tablet_tool_v2 *id,
+                                             uint32_t serial_hi,
+                                             uint32_t serial_lo)
+{
+	struct tablet_tool *tool = data;
+	tool->hardware_serial = ((uint64_t) serial_hi) << 32 |
+		(uint64_t) serial_lo;
+}
+
+static void
+handle_tablet_v2_tablet_tool_hardware_id_wacom(void *data,
+                                               struct zwp_tablet_tool_v2 *id,
+                                               uint32_t id_hi, uint32_t id_lo)
+{
+	struct tablet_tool *tool = data;
+	tool->hardware_id_wacom = ((uint64_t) id_hi) << 32 | (uint64_t) id_lo;
+}
+
+static void
+handle_tablet_v2_tablet_tool_capability(void *data,
+                                        struct zwp_tablet_tool_v2 *id,
+                                        uint32_t capability)
+{
+	struct tablet_tool *tool = data;
+	enum zwp_tablet_tool_v2_capability cap = capability;
+	
+	switch(cap) {
+	case ZWP_TABLET_TOOL_V2_CAPABILITY_TILT:
+		tool->has_tilt = true;
+		break;
+	case ZWP_TABLET_TOOL_V2_CAPABILITY_PRESSURE:
+		tool->has_pressure = true;
+		break;
+	case ZWP_TABLET_TOOL_V2_CAPABILITY_DISTANCE:
+		tool->has_distance = true;
+		break;
+	case ZWP_TABLET_TOOL_V2_CAPABILITY_ROTATION:
+		tool->has_rotation = true;
+		break;
+	case ZWP_TABLET_TOOL_V2_CAPABILITY_SLIDER:
+		tool->has_slider = true;
+		break;
+	case ZWP_TABLET_TOOL_V2_CAPABILITY_WHEEL:
+		tool->has_wheel = true;
+		break;
+	}
+}
+
+static void
+handle_tablet_v2_tablet_tool_proximity_in(void *data,
+                                 struct zwp_tablet_tool_v2 *tool_id,
+                                 uint32_t serial,
+                                 struct zwp_tablet_v2 *tablet_id,
+                                 struct wl_surface *surface)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+	struct tablet *tablet = zwp_tablet_v2_get_user_data(tablet_id);
+
+	fprintf(stderr, "Tablet tool came into proximity with tablet \"%s\", it's type: %s\n",
+	        tablet->name, tablet_tool_type_to_str(tool->type));
+	tool->tablet = tablet;
+}
+
+static void
+handle_tablet_v2_tablet_tool_proximity_out(void *data,
+                                 struct zwp_tablet_tool_v2 *tool_id)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+	fprintf(stderr, "Tool on %s left proximity\n",
+		tool->tablet->name);
+	tool->tablet = NULL;
+}
+
+static void
+handle_tablet_v2_tablet_tool_down(void *data,
+                                  struct zwp_tablet_tool_v2 *tool_id,
+                                  uint32_t serial)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s made contact\n",
+	        tool->tablet->name);
+}
+
+static void
+handle_tablet_v2_tablet_tool_up(void *data,
+                                struct zwp_tablet_tool_v2 *tool_id)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s lost contact\n",
+	        tool->tablet->name);
+}
+
+static void
+handle_tablet_v2_tablet_tool_motion(void *data,
+                                    struct zwp_tablet_tool_v2 *tool_id,
+                                    wl_fixed_t x,
+                                    wl_fixed_t y)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s moved: %gx%g\n",
+	        tool->tablet->name,
+	        wl_fixed_to_double(x), wl_fixed_to_double(y));
+}
+
+static void
+handle_tablet_v2_tablet_tool_pressure(void *data,
+                                      struct zwp_tablet_tool_v2 *tool_id,
+                                      uint32_t pressure)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s changed pressure: %u\n",
+	        tool->tablet->name, pressure);
+}
+
+static void
+handle_tablet_v2_tablet_tool_distance(void *data,
+                                      struct zwp_tablet_tool_v2 *tool_id,
+                                      uint32_t distance)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s changed distance: %u\n",
+	        tool->tablet->name, distance);
+}
+
+static void
+handle_tablet_v2_tablet_tool_tilt(void *data,
+                                  struct zwp_tablet_tool_v2 *tool_id,
+                                  wl_fixed_t tilt_x,
+                                  wl_fixed_t tilt_y)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s tilted: %gx%g\n",
+	        tool->tablet->name,
+	        wl_fixed_to_double(tilt_x), wl_fixed_to_double(tilt_y));
+
+}
+
+static void
+handle_tablet_v2_tablet_tool_rotation(void *data,
+                                      struct zwp_tablet_tool_v2 *tool_id,
+                                      wl_fixed_t degrees)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s changed rotation: %g\n",
+	        tool->tablet->name, wl_fixed_to_double(degrees));
+
+}
+
+static void
+handle_tablet_v2_tablet_tool_slider(void *data,
+                                    struct zwp_tablet_tool_v2 *tool_id,
+                                    int32_t position)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s changed slider: %u\n",
+	        tool->tablet->name, position);
+}
+
+static void
+handle_tablet_v2_tablet_tool_wheel(void *data,
+                                   struct zwp_tablet_tool_v2 *tool_id,
+                                   wl_fixed_t degrees,
+                                   int32_t clicks)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Tool on %s moved wheel: %u (%g)\n",
+	        tool->tablet->name, clicks, wl_fixed_to_double(degrees));
+}
+
+static void
+handle_tablet_v2_tablet_tool_button(void *data,
+                                    struct zwp_tablet_tool_v2 *tool_id,
+                                    uint32_t serial,
+                                    uint32_t button,
+                                    uint32_t state)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+	const char *verb = "pressed";
+
+	if (state == ZWP_TABLET_PAD_V2_BUTTON_STATE_RELEASED) {
+		verb = "released";
+	}
+
+	fprintf(stderr, "Tool on %s %s button: %u\n",
+	        tool->tablet->name, verb, button);
+}
+
+static void
+handle_tablet_v2_tablet_tool_frame(void *data,
+                                   struct zwp_tablet_tool_v2 *tool_id,
+                                   uint32_t time)
+{
+	struct tablet_tool *tool = zwp_tablet_tool_v2_get_user_data(tool_id);
+
+	fprintf(stderr, "Got frame event on tool on %s\n",
+	        tool->tablet->name);
+}
+
+static const struct zwp_tablet_tool_v2_listener tablet_tool_listener = {
+	.removed = handle_tablet_v2_tablet_tool_removed,
+	.done = handle_tablet_v2_tablet_tool_done,
+	.type = handle_tablet_v2_tablet_tool_type,
+	.hardware_serial = handle_tablet_v2_tablet_tool_hardware_serial,
+	.hardware_id_wacom = handle_tablet_v2_tablet_tool_hardware_id_wacom,
+	.capability = handle_tablet_v2_tablet_tool_capability,
+
+	.proximity_in = handle_tablet_v2_tablet_tool_proximity_in,
+	.proximity_out = handle_tablet_v2_tablet_tool_proximity_out,
+	.down = handle_tablet_v2_tablet_tool_down,
+	.up = handle_tablet_v2_tablet_tool_up,
+
+	.motion = handle_tablet_v2_tablet_tool_motion,
+	.pressure = handle_tablet_v2_tablet_tool_pressure,
+	.distance = handle_tablet_v2_tablet_tool_distance,
+	.tilt = handle_tablet_v2_tablet_tool_tilt,
+	.rotation = handle_tablet_v2_tablet_tool_rotation,
+	.slider = handle_tablet_v2_tablet_tool_slider,
+	.wheel = handle_tablet_v2_tablet_tool_wheel,
+	.button = handle_tablet_v2_tablet_tool_button,
+	.frame = handle_tablet_v2_tablet_tool_frame,
+};
+
 static void handle_tool_added(void *data,
 		struct zwp_tablet_seat_v2 *zwp_tablet_seat_v2,
 		struct zwp_tablet_tool_v2 *id) {
+	fprintf(stderr, "Got a new tablet_tool\n");
+	struct tablet_tool *tool = calloc(1, sizeof(struct tablet_tool));
+	if (!tool) {
+		zwp_tablet_tool_v2_destroy(id);
+		return;
+	}
+	zwp_tablet_tool_v2_set_user_data(id, tool);
+	zwp_tablet_tool_v2_add_listener(id, &tablet_tool_listener, tool);
 
+	wl_list_insert(&tools, &tool->link);
+	tool->tool = id;
 }
 
 static void handle_pad_added(void *data,
 		struct zwp_tablet_seat_v2 *zwp_tablet_seat_v2,
 		struct zwp_tablet_pad_v2 *id) {
-
 	fprintf(stderr, "Got a new tablet_pad\n");
 	struct tablet_pad *pad = calloc(1, sizeof(struct tablet_pad));
 	if (!pad) {
